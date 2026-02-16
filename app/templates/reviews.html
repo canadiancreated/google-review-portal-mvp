@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }}</title>
+    <style>
+      body {
+        font-family: Segoe UI, sans-serif;
+        margin: 2rem;
+        color: #1f2937;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        border: 1px solid #e5e7eb;
+        padding: 0.5rem;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: #f3f4f6;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Reviews</h1>
+    <table>
+      <thead>
+        <tr>
+          <th>Reviewer</th>
+          <th>Rating</th>
+          <th>Review (short)</th>
+          <th>Created At</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for review in reviews %}
+        <tr>
+          <td>{{ review.reviewer_name }}</td>
+          <td>{{ review.rating }}</td>
+          <td>{{ review.review_text[:100] }}{% if review.review_text|length > 100 %}...{% endif %}</td>
+          <td>{{ review.created_at.strftime("%Y-%m-%d %H:%M:%S") if review.created_at else "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </body>
+</html>
