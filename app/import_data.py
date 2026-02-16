@@ -33,13 +33,20 @@ def ensure_location(db, location_id: int) -> None:
     db.flush()
 
 
-def import_reviews(path: Path) -> None:
+def import_reviews(path: Path, reset: bool = False) -> None:
     rows = json.loads(path.read_text(encoding="utf-8"))
     db = SessionLocal()
     inserted = 0
     skipped = 0
     try:
         Base.metadata.create_all(bind=engine)
+        if reset:
+            db.query(models.EmployeeMention).delete()
+            db.query(models.AlertLog).delete()
+            db.query(models.ReviewVersion).delete()
+            db.query(models.Review).delete()
+            db.commit()
+
         for row in rows:
             existing = (
                 db.query(models.Review)
@@ -74,13 +81,18 @@ def parse_active(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y"}
 
 
-def import_employees(path: Path) -> None:
+def import_employees(path: Path, reset: bool = False) -> None:
     db = SessionLocal()
     inserted = 0
     skipped = 0
     try:
         Base.metadata.create_all(bind=engine)
         ensure_location(db, 1)
+        if reset:
+            db.query(models.EmployeeMention).delete()
+            db.query(models.Employee).delete()
+            db.commit()
+
         with path.open("r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -118,15 +130,17 @@ def main() -> None:
 
     reviews_parser = subparsers.add_parser("reviews", help="Import reviews JSON.")
     reviews_parser.add_argument("--file", default="sample_reviews.json")
+    reviews_parser.add_argument("--reset", action="store_true")
 
     employees_parser = subparsers.add_parser("employees", help="Import employees CSV.")
     employees_parser.add_argument("--file", default="employees.csv")
+    employees_parser.add_argument("--reset", action="store_true")
 
     args = parser.parse_args()
     if args.command == "reviews":
-        import_reviews(Path(args.file))
+        import_reviews(Path(args.file), reset=args.reset)
     elif args.command == "employees":
-        import_employees(Path(args.file))
+        import_employees(Path(args.file), reset=args.reset)
 
 
 if __name__ == "__main__":

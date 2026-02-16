@@ -42,6 +42,16 @@ def run_employee_mention_detection(db: Session) -> int:
 
     created = 0
     for review in reviews:
+        has_manual_override = (
+            db.query(models.EmployeeMention.id)
+            .filter(models.EmployeeMention.review_id == review.id)
+            .filter(models.EmployeeMention.detection_method == "manual")
+            .first()
+            is not None
+        )
+        if has_manual_override:
+            continue
+
         text_lower = (review.review_text or "").lower()
         if not text_lower.strip():
             continue

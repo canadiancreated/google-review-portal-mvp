@@ -1,8 +1,10 @@
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -15,6 +17,7 @@ from app import models  # noqa: F401
 
 app = FastAPI(title="Google Review Portal MVP")
 templates = Jinja2Templates(directory="app/templates")
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
 @app.on_event("startup")
@@ -54,6 +57,142 @@ def reviews_page(request: Request) -> HTMLResponse:
             name="reviews.html",
             context={"reviews": reviews, "title": "Reviews"},
         )
+    finally:
+        db.close()
+
+
+@app.get("/reviews/{review_id}", response_class=HTMLResponse)
+def review_detail_page(request: Request, review_id: int) -> HTMLResponse:
+    db: Session = SessionLocal()
+    try:
+        row = (
+            db.query(models.Review, models.Location)
+            .join(models.Location, models.Review.location_id == models.Location.id)
+            .filter(models.Review.id == review_id)
+            .first()
+        )
+        if row is None:
+            return HTMLResponse(status_code=404, content="Review not found")
+
+        review, location = row
+
+        manual_mentions = (
+            db.query(models.EmployeeMention)
+            .filter(models.EmployeeMention.review_id == review.id)
+            .filter(models.EmployeeMention.detection_method == "manual")
+            .order_by(models.EmployeeMention.created_at.desc())
+            .all()
+        )
+        if manual_mentions:
+            mention_rows = manual_mentions
+        else:
+            mention_rows = (
+                db.query(models.EmployeeMention)
+                .filter(models.EmployeeMention.review_id == review.id)
+                .order_by(models.EmployeeMention.created_at.desc())
+                .all()
+            )
+
+        mentions = []
+        for mention in mention_rows:
+            employee_name = "Ambiguous"
+            if mention.employee_id is not None:
+                employee = db.query(models.Employee).filter(models.Employee.id == mention.employee_id).first()
+                if employee:
+                    employee_name = employee.full_name
+            mentions.append(
+                {
+                    "id": mention.id,
+                    "employee_name": employee_name,
+                    "ambiguity_flag": mention.ambiguity_flag,
+                    "detection_method": mention.detection_method,
+                    "created_at": mention.created_at,
+                }
+            )
+
+        employees = db.query(models.Employee).order_by(models.Employee.full_name.asc()).all()
+        return templates.TemplateResponse(
+            request=request,
+            name="review_detail.html",
+            context={
+                "title": f"Review {review.id}",
+                "review": review,
+                "location": location,
+                "mentions": mentions,
+                "employees": employees,
+            },
+        )
+    finally:
+        db.close()
+
+
+@app.post("/reviews/{review_id}/mentions")
+def attach_employee_mention(review_id: int, employee_id: int = Form(...)) -> RedirectResponse:
+    db: Session = SessionLocal()
+    try:
+        review = db.query(models.Review).filter(models.Review.id == review_id).first()
+        if review is None:
+            return RedirectResponse(url="/reviews", status_code=303)
+
+        employee = db.query(models.Employee).filter(models.Employee.id == employee_id).first()
+        if employee is None:
+            return RedirectResponse(url=f"/reviews/{review_id}", status_code=303)
+
+        # Manual override takes precedence: remove auto mentions for this review.
+        db.query(models.EmployeeMention).filter(
+            models.EmployeeMention.review_id == review_id,
+            models.EmployeeMention.detection_method == "auto",
+        ).delete()
+
+        existing = (
+            db.query(models.EmployeeMention)
+            .filter(models.EmployeeMention.review_id == review_id)
+            .filter(models.EmployeeMention.employee_id == employee_id)
+            .filter(models.EmployeeMention.detection_method == "manual")
+            .first()
+        )
+        if existing is None:
+            upsert_target = (
+                db.query(models.EmployeeMention)
+                .filter(models.EmployeeMention.review_id == review_id)
+                .filter(models.EmployeeMention.employee_id == employee_id)
+                .first()
+            )
+            if upsert_target is None:
+                db.add(
+                    models.EmployeeMention(
+                        review_id=review_id,
+                        employee_id=employee_id,
+                        detection_method="manual",
+                        ambiguity_flag=False,
+                        confidence_score=None,
+                    )
+                )
+            else:
+                upsert_target.detection_method = "manual"
+                upsert_target.ambiguity_flag = False
+                upsert_target.confidence_score = None
+
+        db.commit()
+        return RedirectResponse(url=f"/reviews/{review_id}", status_code=303)
+    finally:
+        db.close()
+
+
+@app.post("/reviews/{review_id}/mentions/{mention_id}/remove")
+def remove_mention(review_id: int, mention_id: int) -> RedirectResponse:
+    db: Session = SessionLocal()
+    try:
+        mention = (
+            db.query(models.EmployeeMention)
+            .filter(models.EmployeeMention.id == mention_id)
+            .filter(models.EmployeeMention.review_id == review_id)
+            .first()
+        )
+        if mention is not None:
+            db.delete(mention)
+            db.commit()
+        return RedirectResponse(url=f"/reviews/{review_id}", status_code=303)
     finally:
         db.close()
 
