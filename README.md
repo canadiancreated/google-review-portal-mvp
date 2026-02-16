@@ -26,3 +26,7 @@ uvicorn app.main:app --reload
 ```
 
 Then open: http://127.0.0.1:8000/
+
+## Font TODO
+
+TODO: To use Greycliff CF, drop your `.woff2` files into `app/static/fonts/` and add `@font-face` rules in `app/static/app.css`.
