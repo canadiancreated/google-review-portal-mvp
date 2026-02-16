@@ -1,5 +1,4 @@
 from datetime import datetime
-
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -55,9 +54,11 @@ class EmployeeMention(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     review_id: Mapped[int] = mapped_column(ForeignKey("reviews.id"), nullable=False, index=True)
-    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False, index=True)
-    mention_text: Mapped[str] = mapped_column(Text, nullable=False)
-    sentiment: Mapped[str] = mapped_column(String(32), nullable=False, default="neutral")
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=True, index=True)
+    detection_method: Mapped[str] = mapped_column(String(32), nullable=False, default="auto")
+    ambiguity_flag: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    confidence_score: Mapped[float] = mapped_column(Float, nullable=True)
+    mention_text: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 

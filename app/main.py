@@ -1,3 +1,6 @@
+from datetime import date, datetime, time, timedelta
+from typing import Optional
+
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -6,7 +9,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.alerts import run_negative_review_scan
-from app.db import Base, SessionLocal, engine
+from app.db import Base, SessionLocal, engine, ensure_employee_mentions_schema
+from app.mentions import run_employee_mention_detection
 from app import models  # noqa: F401
 
 app = FastAPI(title="Google Review Portal MVP")
@@ -16,6 +20,7 @@ templates = Jinja2Templates(directory="app/templates")
 @app.on_event("startup")
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
+    ensure_employee_mentions_schema()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -96,20 +101,66 @@ def run_alerts_once() -> dict[str, int | str]:
         db.close()
 
 
-@app.get("/dashboard", response_class=HTMLResponse)
-def dashboard_page(request: Request) -> HTMLResponse:
+@app.post("/mentions/run")
+def run_mentions_once() -> dict[str, int | str]:
     db: Session = SessionLocal()
     try:
-        total_reviews = db.query(func.count(models.Review.id)).scalar() or 0
-        avg_rating = db.query(func.avg(models.Review.rating)).scalar()
+        created = run_employee_mention_detection(db)
+        return {"status": "ok", "created_mentions": created}
+    finally:
+        db.close()
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard_page(
+    request: Request,
+    location_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> HTMLResponse:
+    db: Session = SessionLocal()
+    try:
+        parsed_start_date: Optional[date] = None
+        parsed_end_date: Optional[date] = None
+        normalized_start_date = (start_date or "").strip()
+        normalized_end_date = (end_date or "").strip()
+        if normalized_start_date:
+            try:
+                parsed_start_date = date.fromisoformat(normalized_start_date)
+            except ValueError:
+                normalized_start_date = ""
+        if normalized_end_date:
+            try:
+                parsed_end_date = date.fromisoformat(normalized_end_date)
+            except ValueError:
+                normalized_end_date = ""
+
+        review_filters = []
+        selected_location_id = location_id or "all"
+        if location_id not in (None, "all"):
+            try:
+                location_id_int = int(location_id)
+                review_filters.append(models.Review.location_id == location_id_int)
+            except ValueError:
+                selected_location_id = "all"
+        if parsed_start_date is not None:
+            review_filters.append(models.Review.created_at >= datetime.combine(parsed_start_date, time.min))
+        if parsed_end_date is not None:
+            end_next_day = parsed_end_date + timedelta(days=1)
+            review_filters.append(models.Review.created_at < datetime.combine(end_next_day, time.min))
+
+        total_reviews = db.query(func.count(models.Review.id)).filter(*review_filters).scalar() or 0
+        avg_rating = db.query(func.avg(models.Review.rating)).filter(*review_filters).scalar()
         negative_reviews = (
             db.query(func.count(models.Review.id))
+            .filter(*review_filters)
             .filter(models.Review.rating <= 2)
             .scalar()
             or 0
         )
         positive_reviews = (
             db.query(func.count(models.Review.id))
+            .filter(*review_filters)
             .filter(models.Review.rating >= 3)
             .scalar()
             or 0
@@ -120,11 +171,13 @@ def dashboard_page(request: Request) -> HTMLResponse:
                 func.date(models.Review.created_at).label("day"),
                 func.count(models.Review.id).label("count"),
             )
+            .filter(*review_filters)
             .group_by(func.date(models.Review.created_at))
             .order_by(func.date(models.Review.created_at).desc())
             .all()
         )
         reviews_by_day = [{"day": row.day, "count": row.count} for row in reviews_by_day_raw]
+        locations = db.query(models.Location).order_by(models.Location.name.asc()).all()
 
         return templates.TemplateResponse(
             request=request,
@@ -136,6 +189,101 @@ def dashboard_page(request: Request) -> HTMLResponse:
                 "negative_reviews": negative_reviews,
                 "positive_reviews": positive_reviews,
                 "reviews_by_day": reviews_by_day,
+                "locations": locations,
+                "selected_location_id": selected_location_id,
+                "selected_start_date": normalized_start_date,
+                "selected_end_date": normalized_end_date,
+            },
+        )
+    finally:
+        db.close()
+
+
+@app.get("/employees", response_class=HTMLResponse)
+def employees_page(request: Request, active_only: Optional[str] = "1") -> HTMLResponse:
+    db: Session = SessionLocal()
+    try:
+        active_only_flag = active_only != "0"
+        employees_query = db.query(models.Employee).order_by(models.Employee.full_name.asc())
+        if active_only_flag:
+            employees_query = employees_query.filter(models.Employee.is_active.is_(True))
+        employees = employees_query.all()
+
+        rows = []
+        for employee in employees:
+            base_query = (
+                db.query(models.Review)
+                .join(models.EmployeeMention, models.EmployeeMention.review_id == models.Review.id)
+                .filter(models.EmployeeMention.employee_id == employee.id)
+                .filter(models.EmployeeMention.ambiguity_flag.is_(False))
+            )
+            mentions_count = base_query.count()
+            avg_rating = base_query.with_entities(func.avg(models.Review.rating)).scalar()
+            low_count = base_query.filter(models.Review.rating <= 2).count()
+            high_count = base_query.filter(models.Review.rating >= 3).count()
+            rows.append(
+                {
+                    "id": employee.id,
+                    "full_name": employee.full_name,
+                    "mentions": mentions_count,
+                    "avg_rating": round(float(avg_rating), 2) if avg_rating is not None else 0,
+                    "low_count": low_count,
+                    "high_count": high_count,
+                    "is_active": employee.is_active,
+                }
+            )
+
+        return templates.TemplateResponse(
+            request=request,
+            name="employees.html",
+            context={
+                "title": "Employees",
+                "rows": rows,
+                "active_only": "1" if active_only_flag else "0",
+            },
+        )
+    finally:
+        db.close()
+
+
+@app.get("/employees/{employee_id}", response_class=HTMLResponse)
+def employee_detail_page(request: Request, employee_id: int) -> HTMLResponse:
+    db: Session = SessionLocal()
+    try:
+        employee = db.query(models.Employee).filter(models.Employee.id == employee_id).first()
+        if employee is None:
+            return HTMLResponse(status_code=404, content="Employee not found")
+
+        review_rows = (
+            db.query(models.Review)
+            .join(models.EmployeeMention, models.EmployeeMention.review_id == models.Review.id)
+            .filter(models.EmployeeMention.employee_id == employee_id)
+            .filter(models.EmployeeMention.ambiguity_flag.is_(False))
+            .order_by(models.Review.created_at.desc())
+            .all()
+        )
+
+        reviews = []
+        for review in review_rows:
+            snippet = review.review_text[:180] if review.review_text else ""
+            if review.review_text and len(review.review_text) > 180:
+                snippet += "..."
+            reviews.append(
+                {
+                    "rating": review.rating,
+                    "reviewer_name": review.reviewer_name,
+                    "created_at": review.created_at,
+                    "snippet": snippet,
+                }
+            )
+
+        return templates.TemplateResponse(
+            request=request,
+            name="employee_detail.html",
+            context={
+                "title": employee.full_name,
+                "employee": employee,
+                "reviews": reviews,
             },
         )
     finally:
