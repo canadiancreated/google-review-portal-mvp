@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: firefly_google_reviews_db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: firefly
+      POSTGRES_PASSWORD: firefly_dev_password
+      POSTGRES_DB: google_review_portal
+    volumes:
+      - firefly_google_reviews_pgdata:/var/lib/postgresql/data
+
+volumes:
+  firefly_google_reviews_pgdata:
